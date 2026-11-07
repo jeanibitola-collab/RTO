@@ -1,0 +1,41 @@
+body {
+  margin: 0;
+  overflow: hidden;
+  font-family: sans-serif;
+}
+
+#hud {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  padding: 8px 14px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffc400;
+  font-size: 20px;
+  font-weight: bold;
+  border-radius: 8px;
+}
+
+#money {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  padding: 8px 14px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #4caf50;
+  font-size: 22px;
+  font-weight: bold;
+  border-radius: 8px;
+  transition: transform 0.15s, color 0.15s;
+}
+
+/* Flashes red when money is spent, gold when it's earned */
+#money.spend {
+  color: #ff5252;
+  transform: scale(1.15);
+}
+
+#money.earn {
+  color: #ffd54f;
+  transform: scale(1.15);
+}
