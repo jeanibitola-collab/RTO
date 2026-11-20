@@ -2365,3 +2365,23 @@ function goLandscape() {
 }
 if (ON_TOUCH)
   window.addEventListener("pointerdown", goLandscape, { once: true });
+
+// ---------- Home theatre music in his room ----------
+const ROOM_MUSIC_VOLUME = 0.6; // how loud the music is in the room (0 to 1)
+const roomMusic = new Audio('/sounds/room-music.mp3');
+roomMusic.loop = true;
+roomMusic.volume = 0;
+
+// Phones only allow sound after a tap, so start it on the first touch or key press
+function startRoomMusic() {
+  roomMusic.play().catch((e) => console.warn('Room music could not play:', e));
+}
+window.addEventListener('pointerdown', startRoomMusic, { once: true });
+window.addEventListener('keydown', startRoomMusic, { once: true });
+
+// Fade it in when he's in the room, and out when he leaves
+setInterval(() => {
+  const target = inRoom ? ROOM_MUSIC_VOLUME : 0;
+  const change = target - roomMusic.volume;
+  roomMusic.volume = Math.min(1, Math.max(0, roomMusic.volume + Math.sign(change) * Math.min(Math.abs(change), 0.05)));
+}, 100);
