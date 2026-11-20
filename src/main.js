@@ -1,8 +1,10 @@
 import * as THREE from "three";
 import "./style.css";
-import { buildLagos } from "./lagos.js";
+import { buildLagos, ROUNDABOUTS } from "./lagos.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
+import { buildRoom } from "./room.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 // ---------- Scene, camera, renderer ----------
 const scene = new THREE.Scene();
@@ -12,23 +14,34 @@ scene.fog = new THREE.Fog(0xe8c48f, 40, 160);
 const camera = new THREE.PerspectiveCamera(
   60,
   window.innerWidth / window.innerHeight,
-  0.1,
-  500,
+  0.25, // nearest it can see (a little further = sharper depth, less flicker)
+  300, // furthest it can see (the fog hides everything past about 160 m anyway)
 );
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 document.body.appendChild(renderer.domElement);
 
+// More natural colours and soft, bouncing light (like light reflecting off walls)
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.75; // a little darker, less washed out
+renderer.shadowMap.enabled = true; // turn on shadows
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // soft-edged shadows
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
 // ---------- Lights ----------
-scene.add(new THREE.HemisphereLight(0xfff2d6, 0x8a5a3c, 1.5));
+const skyLight = new THREE.HemisphereLight(0xfff2d6, 0x8a5a3c, 1.5);
+scene.add(skyLight);
 const sun = new THREE.DirectionalLight(0xffffff, 2);
 sun.position.set(30, 50, 20);
 scene.add(sun);
 
 // ---------- Build Lagos ----------
 const lagos = buildLagos(scene);
+const room = buildRoom(scene);
+let inRoom = true; // the game starts in his room
 // ---------- The danfo (placeholder until the real model loads) ----------
 function createDanfo() {
   const danfo = new THREE.Group();
@@ -107,6 +120,7 @@ loader.load(
 
     // Hide each bus's placeholder boxes (but not the passengers) and add a copy of the real danfo
     for (const bus of buses) {
+      if (bus.name) continue; // kekes and big buses get their own model
       bus.children.forEach((child) => {
         if (!child.userData.isSeat) child.visible = false;
       });
@@ -118,6 +132,90 @@ loader.load(
     console.error("Could not load danfo.glb:", error);
   },
 );
+
+// ---------- Other rides you can board: kekes and big buses ----------
+const RIDES = {
+  keke: {
+    model: "/models/keke.glb",
+    count: 6,
+    length: 2.8,
+    width: 1.4,
+    speed: 9,
+    seats: 3,
+    fare: 300,
+    turnFix: 0,
+    color: 0xfbc02d,
+    lift: 0,
+    call: (stop) => `Keke man: "${stop}? Enter, enter!"`,
+  },
+  bus: {
+    model: "/models/bus.glb",
+    count: 4,
+    length: 6,
+    width: 2.1,
+    speed: 13,
+    seats: 14,
+    fare: 600,
+    turnFix: 0,
+    color: 0xeeeeee,
+    lift: 0,
+    call: (stop) => `Conductor: "${stop}! ${stop}! Coaster dey go, enter!"`,
+  },
+};
+
+for (const [name, ride] of Object.entries(RIDES)) {
+  const made = [];
+  for (let i = 0; i < ride.count; i++) {
+    const vehicle = new THREE.Group();
+    vehicle.name = name; // 'keke' or 'bus'
+    const placeholder = new THREE.Mesh(
+      new THREE.BoxGeometry(ride.width, 1.8, ride.length),
+      new THREE.MeshStandardMaterial({ color: ride.color }),
+    );
+    placeholder.position.y = 1;
+    vehicle.add(placeholder);
+    scene.add(vehicle);
+    // Slot it in at a random place among the danfos, so they're spread along the route
+    buses.splice(Math.floor(Math.random() * (buses.length + 1)), 0, vehicle);
+    made.push(vehicle);
+  }
+
+  // Load the real model, size it, and give each vehicle of this kind a copy
+  loader.load(
+    ride.model,
+    (gltf) => {
+      const model = gltf.scene;
+      model.rotation.y = ride.turnFix;
+      model.traverse((obj) => {
+        if (obj.isMesh) {
+          const mats = Array.isArray(obj.material)
+            ? obj.material
+            : [obj.material];
+          mats.forEach((m) => {
+            m.metalness = Math.min(m.metalness ?? 0, 0.3);
+          });
+        }
+      });
+      let box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      model.scale.multiplyScalar(ride.length / Math.max(size.x, size.z));
+      box = new THREE.Box3().setFromObject(model);
+      const center = box.getCenter(new THREE.Vector3());
+      model.position.x -= center.x;
+      model.position.z -= center.z;
+      model.position.y -= box.min.y;
+
+      for (const v of made) {
+        v.children.forEach((child) => {
+          if (!child.userData.isSeat) child.visible = false;
+        });
+        v.add(model.clone());
+      }
+    },
+    undefined,
+    (error) => console.error("Could not load", ride.model, error),
+  );
+}
 
 // ---------- The player (placeholder until the real model loads) ----------
 function createPlayer() {
@@ -141,8 +239,9 @@ function createPlayer() {
 }
 
 const player = createPlayer();
-player.position.set(-50, 0, 34); // at the roadside by the Ikeja bus stop
-player.rotation.y = Math.PI / 2;
+const SIT_LIFT = 0.1; // raises him to the height of the bed (adjust if he floats or sinks)
+player.position.set(room.sitSpot.x, SIT_LIFT, room.sitSpot.z); // sitting on the bed
+player.rotation.y = room.sitSpot.rotation;
 scene.add(player);
 
 // ---------- Load the real player model ----------
@@ -176,6 +275,7 @@ loader.load(
     model.traverse((obj) => {
       if (obj.isMesh) {
         obj.frustumCulled = false;
+        obj.castShadow = true; // he casts a shadow in his room
         const materials = Array.isArray(obj.material)
           ? obj.material
           : [obj.material];
@@ -243,6 +343,16 @@ loader.load(
         playerHips = obj;
       }
     });
+    // Start sitting on the bed, or standing beside it if there's no sitting animation
+    if (playerState === "sitting") {
+      if (playerActions["sit"]) {
+        playAction("sit");
+      } else {
+        playerState = "free";
+        player.position.set(room.spawn.x, 0, room.spawn.z);
+        player.rotation.y = room.spawn.rotation;
+      }
+    }
   },
   undefined,
   (error) => {
@@ -251,7 +361,11 @@ loader.load(
 );
 
 // ---------- Controls ----------
+const ON_TOUCH =
+  window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
 const keys = {};
+let joyX = 0; // joystick left/right, from -1 to 1 (0 when not touched)
+let joyY = 0; // joystick up/down, from -1 to 1
 window.addEventListener("keydown", (e) => {
   keys[e.key.toLowerCase()] = true;
 });
@@ -261,6 +375,29 @@ window.addEventListener("keyup", (e) => {
 
 const UP = new THREE.Vector3(0, 1, 0);
 const PLAYER_RADIUS = 0.7;
+const ROOM_RADIUS = 0.35; // smaller collision circle indoors, where things are close together
+// ---------- Sitting on the bed at the start ----------
+let playerState = "sitting"; // 'sitting' → 'standingUp' → 'free'
+let standTimer = 0;
+let standDuration = 1;
+const STAND_FORWARD = 0.5; // how far he moves off the bed while standing up
+
+function startStandingUp() {
+  if (playerState !== "sitting") return;
+  const standup = playerActions["standup"];
+  if (!standup) {
+    // No stand-up animation: just stand
+    playerState = "free";
+    player.position.y = 0;
+    return;
+  }
+  playerState = "standingUp";
+  standup.setLoop(THREE.LoopOnce, 1);
+  standup.clampWhenFinished = true;
+  playAction("standup");
+  standDuration = standup.getClip().duration;
+  standTimer = standDuration;
+}
 let currentBus = null; // the bus he's riding, or null when on foot
 let boardCooldown = 0; // seconds before he can board again after getting off
 
@@ -270,19 +407,21 @@ const DANFO_HALF_WIDTH = 1.3;
 const DANFO_HALF_LENGTH = DANFO_LENGTH / 2 + 0.2;
 
 function hitsBus(bus, x, z, r) {
+  const halfW = bus.userData.halfW ?? DANFO_HALF_WIDTH; // each vehicle has its own size
+  const halfL = bus.userData.halfL ?? DANFO_HALF_LENGTH;
   const dx = x - bus.position.x;
   const dz = z - bus.position.z;
   const angle = bus.rotation.y;
   const localX = dx * Math.cos(angle) - dz * Math.sin(angle);
   const localZ = dx * Math.sin(angle) + dz * Math.cos(angle);
-  return (
-    Math.abs(localX) < DANFO_HALF_WIDTH + r &&
-    Math.abs(localZ) < DANFO_HALF_LENGTH + r
-  );
+  return Math.abs(localX) < halfW + r && Math.abs(localZ) < halfL + r;
 }
 
 function hitsAnyBus(x, z, r) {
-  return buses.some((bus) => hitsBus(bus, x, z, r));
+  return (
+    buses.some((bus) => hitsBus(bus, x, z, r)) ||
+    traffic.some((v) => hitsBus(v, x, z, r))
+  );
 }
 
 // Move an object, sliding along walls instead of passing through them
@@ -291,8 +430,10 @@ function tryMove(obj, dx, dz, radius, avoidBuses = false) {
   const insideBus =
     avoidBuses && hitsAnyBus(obj.position.x, obj.position.z, radius);
   const checkBuses = avoidBuses && !insideBus;
+
   const blocked = (x, z) =>
-    lagos.isBlocked(x, z, radius) || (checkBuses && hitsAnyBus(x, z, radius));
+    (inRoom ? room.isBlocked(x, z, radius) : lagos.isBlocked(x, z, radius)) ||
+    (checkBuses && hitsAnyBus(x, z, radius));
 
   let moved = true;
   if (!blocked(obj.position.x + dx, obj.position.z)) {
@@ -313,6 +454,41 @@ const WALK_SPEED = 2.2; // slower, so his feet match the walk animation
 const RUN_SPEED = 6;
 const PLAYER_TURN_SPEED = 3;
 
+// ---------- Joystick feel ----------
+const STICK_DEAD_ZONE = 0.2; // ignore small movements near the centre
+const TOUCH_TURN_FACTOR = 0.6; // turn slower on the joystick than on the keyboard
+
+// Gives fine control near the centre and full speed at the edge
+function stickCurve(value) {
+  const amount = Math.abs(value);
+  if (amount < STICK_DEAD_ZONE) return 0;
+  const scaled = (amount - STICK_DEAD_ZONE) / (1 - STICK_DEAD_ZONE);
+  return Math.sign(value) * scaled * scaled;
+}
+
+// ---------- Safety net: never let him get stuck inside something ----------
+// If he's inside furniture, a wall or a building, move him to the nearest free spot
+function unstickPlayer() {
+  const r = inRoom ? ROOM_RADIUS : PLAYER_RADIUS;
+  const blockedAt = (x, z) =>
+    inRoom ? room.isBlocked(x, z, r) : lagos.isBlocked(x, z, r);
+  if (!blockedAt(player.position.x, player.position.z)) return; // not stuck
+
+  // Search in growing circles around him for the closest free spot
+  for (let dist = 0.1; dist <= 3; dist += 0.1) {
+    for (let i = 0; i < 16; i++) {
+      const angle = (i / 16) * Math.PI * 2;
+      const x = player.position.x + Math.sin(angle) * dist;
+      const z = player.position.z + Math.cos(angle) * dist;
+      if (!blockedAt(x, z)) {
+        player.position.x = x;
+        player.position.z = z;
+        return;
+      }
+    }
+  }
+}
+
 function updatePlayer(dt) {
   const forward = keys["arrowup"] || keys["w"];
   const back = keys["arrowdown"] || keys["s"];
@@ -321,17 +497,64 @@ function updatePlayer(dt) {
   const running = keys["shift"];
   const moveSpeed = running ? RUN_SPEED : WALK_SPEED;
 
-  const turn = (left ? 1 : 0) - (right ? 1 : 0);
-  player.rotation.y += turn * PLAYER_TURN_SPEED * dt;
+  // Sitting on the bed: only the Get up button (or E) makes him stand
+  if (playerState === "sitting") {
+    playAction("sit");
+    // Stay exactly on the bed's edge (it moves once the real bed has loaded)
+    player.position.set(room.sitSpot.x, SIT_LIFT, room.sitSpot.z);
+    player.rotation.y = room.sitSpot.rotation;
+    return;
+  }
 
-  const move = (forward ? 1 : 0) - (back ? 0.5 : 0); // walking backwards is slower
+  // Standing up: play the animation, lower him to the floor, and step off the bed
+  if (playerState === "standingUp") {
+    standTimer -= dt;
+    player.position.y = SIT_LIFT * Math.max(0, standTimer / standDuration);
+    const step = (STAND_FORWARD * dt) / standDuration;
+    player.position.x += Math.sin(player.rotation.y) * step;
+    player.position.z += Math.cos(player.rotation.y) * step;
+    if (standTimer <= 0) {
+      playerState = "free";
+      player.position.y = 0;
+      // Make sure he's completely clear of the bed before he can walk
+      for (
+        let i = 0;
+        i < 40 &&
+        room.isBlocked(player.position.x, player.position.z, ROOM_RADIUS);
+        i++
+      ) {
+        player.position.x += Math.sin(player.rotation.y) * 0.05;
+        player.position.z += Math.cos(player.rotation.y) * 0.05;
+      }
+    }
+    return;
+  }
+
+  // Free to move: first make sure he isn't stuck inside anything
+  unstickPlayer();
+
+  let turn = (left ? 1 : 0) - (right ? 1 : 0);
+  let move = (forward ? 1 : 0) - (back ? 0.5 : 0); // walking backwards is slower
+
+  // Joystick: gentle and gradual (push further to turn or walk faster)
+  if (joyX !== 0 || joyY !== 0) {
+    turn = -stickCurve(joyX) * TOUCH_TURN_FACTOR;
+    move = -stickCurve(joyY);
+    if (move < 0) move *= 0.5; // stepping back is slower
+  }
+
+  player.rotation.y += turn * PLAYER_TURN_SPEED * dt;
   const dx = Math.sin(player.rotation.y) * move * moveSpeed * dt;
   const dz = Math.cos(player.rotation.y) * move * moveSpeed * dt;
-  tryMove(player, dx, dz, PLAYER_RADIUS, true);
+  tryMove(player, dx, dz, inRoom ? ROOM_RADIUS : PLAYER_RADIUS, true);
 
   // Pick the right animation
   if (move !== 0) {
-    playAction(running ? "run" : "walk", move < 0 ? -1 : 1);
+    // Slower walking plays the animation slower, so his feet match
+    playAction(
+      running ? "run" : "walk",
+      Math.sign(move) * Math.max(0.5, Math.abs(move)),
+    );
   } else {
     playAction("idle");
   }
@@ -411,20 +634,77 @@ function updateSeatFigures(bus) {
   });
 }
 
-// ---------- The danfo route ----------
+// ---------- Driving round a roundabout (keeping the middle on the left) ----------
+const RB_LANE_RADIUS = 11; // the circle the danfos drive round on
+const RB_LANE_SHIFT = 2.5; // the same as driving on the right-hand side of the road
+
+// The points a danfo drives through to go round a roundabout:
+// arriving in direction inDir, leaving in direction outDir (each [x, z])
+function roundabout(rb, inDir, outDir) {
+  const right = ([fx, fz]) => [-fz, fx];
+  const [irx, irz] = right(inDir);
+  const [orx, orz] = right(outDir);
+  const entryAngle = Math.atan2(
+    -inDir[1] * RB_LANE_RADIUS + irz * RB_LANE_SHIFT,
+    -inDir[0] * RB_LANE_RADIUS + irx * RB_LANE_SHIFT,
+  );
+  let exitAngle = Math.atan2(
+    outDir[1] * RB_LANE_RADIUS + orz * RB_LANE_SHIFT,
+    outDir[0] * RB_LANE_RADIUS + orx * RB_LANE_SHIFT,
+  );
+  while (exitAngle >= entryAngle) exitAngle -= Math.PI * 2; // always go round the same way
+
+  const points = [];
+  for (let a = entryAngle; a > exitAngle; a -= 0.4) {
+    points.push({
+      x: rb.x + Math.cos(a) * RB_LANE_RADIUS,
+      z: rb.z + Math.sin(a) * RB_LANE_RADIUS,
+      noLane: true,
+    });
+  }
+  points.push({
+    x: rb.x + Math.cos(exitAngle) * RB_LANE_RADIUS,
+    z: rb.z + Math.sin(exitAngle) * RB_LANE_RADIUS,
+    noLane: true,
+  });
+  return points;
+}
+
+const YABA_RB = ROUNDABOUTS[0];
+const OBALENDE_RB = ROUNDABOUTS[1];
+
+// A loop that only ever drives forward, going round the roundabouts
 const DANFO_ROUTE = [
-  { x: -50, z: 40, stop: "Ikeja" },
-  { x: 120, z: 40 }, // across the bridge
+  { x: -30, z: 40, stop: "Ikeja" }, // well clear of Yaba Roundabout
+  ...roundabout(YABA_RB, [-1, 0], [0, 1]), // round Yaba Roundabout, then up the avenue
+  { x: -60, z: 125 }, // along the Ikeja road
+  { x: 0, z: 125 }, // down the link road
+  { x: 0, z: 40 }, // towards the bridge
+  ...roundabout(OBALENDE_RB, [1, 0], [0, 1]), // over the bridge, round Obalende Roundabout, towards Marina
   { x: 120, z: 110, stop: "Marina" },
-  { x: 120, z: 40 },
-  { x: 120, z: -125, stop: "Lekki" },
-  { x: 120, z: 40 }, // back towards the bridge
+  { x: 120, z: 150 }, // along the north road
+  { x: 180, z: 150 }, // down the east road
+  { x: 180, z: -130 }, // along the Lekki road
+  { x: 120, z: -130 }, // up the Island road
+  { x: 120, z: -115, stop: "Lekki" },
+  ...roundabout(OBALENDE_RB, [0, 1], [-1, 0]), // round Obalende Roundabout, back towards the bridge
 ];
+
 const BUS_GAP = 8; // a bus stops if another bus is this close ahead (metres)
 const BUS_SPEED = 14; // metres per second, about 50 km/h
 const BUS_WAIT = 8; // seconds at each stop
 const LANE_OFFSET = 2.5; // drive on the right-hand side of the road
 const DANFO_FARE = 500; // naira
+
+// Each ride's own seats, fare and driver's call (danfos use the danfo values)
+const seatsOf = (bus) => bus.userData.seats ?? BUS_SEATS;
+const fareOf = (bus) => bus.userData.fare ?? DANFO_FARE;
+function rideCall(bus, stop) {
+  const ride = RIDES[bus.name];
+  return ride
+    ? ride.call(stop)
+    : `Conductor: "${stop}! ${stop}! Enter with your change!"`;
+}
 
 // ---------- Spread the buses evenly along the whole route ----------
 const routeLengths = DANFO_ROUTE.map((point, i) => {
@@ -454,7 +734,7 @@ function pointAlongRoute(distance) {
 
 // Set up each bus: its place on the route, its passengers and driver
 buses.forEach((bus, i) => {
-  const start = pointAlongRoute((i / BUS_COUNT) * routeTotal);
+  const start = pointAlongRoute((i / buses.length) * routeTotal);
   bus.position.set(
     start.x - Math.cos(start.angle) * LANE_OFFSET, // on the right-hand lane
     0,
@@ -489,29 +769,196 @@ buses.forEach((bus, i) => {
   updateSeatFigures(bus);
 });
 
+// Kekes and big buses: their own seats, fare, speed and size, and no danfo seat figures
+for (const bus of buses) {
+  const ride = RIDES[bus.name];
+  if (!ride) continue; // a danfo
+  bus.userData.seatGroup.clear();
+  bus.userData.seatFigures = [];
+  Object.assign(bus.userData, {
+    seats: ride.seats,
+    fare: ride.fare,
+    speed: ride.speed * (0.9 + Math.random() * 0.2),
+    halfW: ride.width / 2,
+    halfL: ride.length / 2,
+    passengers: Math.floor(Math.random() * ride.seats * 0.6),
+  });
+}
+
 // ---------- Traffic: is there another bus close ahead in the same lane? ----------
 function busAhead(bus) {
-  const fx = Math.sin(bus.rotation.y);
-  const fz = Math.cos(bus.rotation.y);
-  for (const other of buses) {
-    if (other === bus) continue;
-    const dx = other.position.x - bus.position.x;
-    const dz = other.position.z - bus.position.z;
+  return vehicleAhead(bus); // danfos now queue behind cars and trucks too
+}
+
+// ================= Traffic: cars, jeeps and trucks =================
+// They drive the same roads as the danfos, but never stop at bus stops
+const TRAFFIC_TYPES = [
+  {
+    name: "sedan",
+    model: "/models/sedan.glb",
+    length: 4.5,
+    width: 1.8,
+    count: 6,
+    speed: 16,
+    turnFix: 0,
+    color: 0x1e88e5,
+  },
+  {
+    name: "jeep",
+    model: "/models/jeep.glb",
+    length: 4.8,
+    width: 1.9,
+    count: 4,
+    speed: 15,
+    turnFix: 0,
+    color: 0x424242,
+  },
+  {
+    name: "truck",
+    model: "/models/truck.glb",
+    length: 8,
+    width: 2.4,
+    count: 2,
+    speed: 9,
+    turnFix: 0,
+    color: 0xc62828,
+  },
+];
+const traffic = [];
+
+TRAFFIC_TYPES.forEach((type) => {
+  // A simple coloured box for each vehicle, until its real model loads
+  for (let i = 0; i < type.count; i++) {
+    const vehicle = new THREE.Group();
+    const placeholder = new THREE.Mesh(
+      new THREE.BoxGeometry(type.width, 1.6, type.length),
+      new THREE.MeshStandardMaterial({ color: type.color }),
+    );
+    placeholder.position.y = 0.9;
+    vehicle.add(placeholder);
+    vehicle.userData = {
+      type: type.name,
+      speed: type.speed * (0.9 + Math.random() * 0.2), // each driver a little faster or slower
+      halfW: type.width / 2,
+      halfL: type.length / 2,
+      routeIndex: 0,
+    };
+    scene.add(vehicle);
+    traffic.push(vehicle);
+  }
+
+  // Load the real model, size it, and give every vehicle of this type a copy
+  loader.load(
+    type.model,
+    (gltf) => {
+      const model = gltf.scene;
+      model.rotation.y = type.turnFix;
+      model.traverse((obj) => {
+        if (obj.isMesh) {
+          const mats = Array.isArray(obj.material)
+            ? obj.material
+            : [obj.material];
+          mats.forEach((m) => {
+            m.metalness = Math.min(m.metalness ?? 0, 0.3);
+          }); // not too shiny or black
+        }
+      });
+
+      let box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      model.scale.multiplyScalar(type.length / Math.max(size.x, size.z));
+      box = new THREE.Box3().setFromObject(model);
+      const center = box.getCenter(new THREE.Vector3());
+      model.position.x -= center.x;
+      model.position.z -= center.z;
+      model.position.y -= box.min.y;
+
+      for (const v of traffic) {
+        if (v.userData.type !== type.name) continue;
+        v.children.forEach((child) => {
+          if (!child.userData.isSeat) child.visible = false; // keep the driver
+        });
+        v.add(model.clone());
+      }
+    },
+    undefined,
+    (error) => console.error("Could not load", type.model, error),
+  );
+});
+
+// Spread the traffic along the route, between the danfos
+traffic.forEach((v, i) => {
+  const start = pointAlongRoute(((i + 0.5) / traffic.length) * routeTotal);
+  v.position.set(
+    start.x - Math.cos(start.angle) * LANE_OFFSET,
+    0,
+    start.z + Math.sin(start.angle) * LANE_OFFSET,
+  );
+  v.rotation.y = start.angle;
+  v.userData.routeIndex = start.nextIndex;
+});
+
+const allVehicles = buses.concat(traffic);
+
+// Is any vehicle close ahead in the same lane? (works for danfos, cars and trucks)
+function vehicleAhead(v) {
+  const fx = Math.sin(v.rotation.y);
+  const fz = Math.cos(v.rotation.y);
+  const myHalf = v.userData.halfL ?? DANFO_LENGTH / 2;
+  for (const other of allVehicles) {
+    if (other === v) continue;
+    const dx = other.position.x - v.position.x;
+    const dz = other.position.z - v.position.z;
     const ahead = dx * fx + dz * fz; // how far in front
     const side = Math.abs(dx * fz - dz * fx); // how far to the side
     const sameWay =
       Math.sin(other.rotation.y) * fx + Math.cos(other.rotation.y) * fz > 0.3;
-    if (sameWay && ahead > 0 && ahead < BUS_GAP && side < 1.8) return true;
+    const gap = myHalf + (other.userData.halfL ?? DANFO_LENGTH / 2) + 2.5; // bumper to bumper, plus a little space
+    if (sameWay && ahead > 0 && ahead < gap && side < 1.8) return true;
   }
   return false;
 }
+
+// Drive a car or truck along the route (it never stops at bus stops)
+function updateTrafficVehicle(v, dt) {
+  const target = laneTarget(v);
+  const dx = target.x - v.position.x;
+  const dz = target.z - v.position.z;
+  const dist = Math.hypot(dx, dz);
+
+  if (dist < 3) {
+    v.userData.routeIndex = (v.userData.routeIndex + 1) % DANFO_ROUTE.length;
+    return;
+  }
+  if (vehicleAhead(v)) return; // wait in traffic
+
+  const desired = Math.atan2(dx, dz);
+  let diff = desired - v.rotation.y;
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  v.rotation.y += diff * Math.min(1, 2.5 * dt);
+
+  const step = v.userData.speed * (Math.abs(diff) > 0.4 ? 0.25 : 1) * dt;
+  v.position.x += Math.sin(v.rotation.y) * step;
+  v.position.z += Math.cos(v.rotation.y) * step;
+
+  // On the bridge, always stay on your own side of the middle barrier
+  if (v.position.x > 20 && v.position.x < 60) {
+    const keep = 0.3 + v.userData.halfW + 0.1;
+    const headingWest = Math.sin(v.rotation.y) < 0;
+    v.position.z = headingWest
+      ? Math.min(v.position.z, 40 - keep)
+      : Math.max(v.position.z, 40 + keep);
+  }
+}
+
 // ---------- Real passenger models ----------
 const PASSENGER_MODELS = [
   "/models/passenger-dansiki.glb",
   "/models/passenger-marketwoman.glb",
   "/models/passenger-office.glb",
+  "/models/passenger-streetboy.glb",
 ];
-const PASSENGER_HEIGHT = 1.3; // how tall a seated passenger is, in metres
+const PASSENGER_HEIGHT = 1.5; // how tall a seated passenger is, in metres
 const PASSENGER_MAX_WIDTH = 0.6; // no passenger wider than this, so they fit inside
 const PASSENGER_FLOOR = 0.45; // height of the danfo's floor
 const PASSENGER_TURN_FIX = 0; // change to Math.PI if passengers face backwards
@@ -663,19 +1110,77 @@ PASSENGER_MODELS.forEach((path, i) => {
   );
 });
 
-// The point a bus is driving towards, shifted onto the right-hand lane
+// ---------- A driver in every vehicle ----------
+// Where he sits in each kind of vehicle (metres): x = left/right, z = forward/back, floor = seat height
+const DRIVER_SEATS = {
+  danfo: { x: DRIVER_SEAT[0], z: 1.8, floor: PASSENGER_FLOOR, scale: 1.3 },
+  keke: { x: 0, z: 0.8, floor: 0.35, scale: 1.0 },
+  bus: { x: 0.55, z: 2.0, floor: 0.55, scale: 1.3 },
+  sedan: { x: 0.38, z: 0.5, floor: 0.2, scale: 1.05 },
+  jeep: { x: 0.42, z: 0.7, floor: 0.45, scale: 1.3 },
+  truck: { x: 0.55, z: 3.0, floor: 1.1, scale: 1.5 },
+};
+const DRIVER_SCALE = 1.3; // how much bigger the drivers are than the passengers
+const drivers = [];
+const kindOf = (v) => v.userData.type || v.name || "danfo";
+
+loader.load(
+  "/models/driver.glb",
+  (gltf) => {
+    const template = preparePassenger(bakePose(gltf, "/models/driver.glb")); // frozen in his driving pose
+    allVehicles.forEach((v, i) => {
+      const seat = DRIVER_SEATS[kindOf(v)];
+      if (!seat) return;
+      const driver = template.clone();
+      const scale = seat.scale ?? DRIVER_SCALE; // this vehicle's driver size
+      driver.scale.setScalar(scale);
+      if (typeof varyLook === "function") varyLook(driver); // a different shirt colour, if the colour helper exists
+      driver.position.set(seat.x, seat.floor - PASSENGER_FLOOR * scale, seat.z);
+      driver.userData.isSeat = true; // so the vehicle loaders don't hide him
+      v.add(driver);
+      drivers.push({ vehicle: v, driver });
+
+      // In the danfos, he replaces the passenger who was sitting at the wheel
+      if (kindOf(v) === "danfo") {
+        const oldDriver = v.userData.seatGroup?.children.at(-1);
+        if (oldDriver) oldDriver.visible = false;
+      }
+    });
+    console.log("Drivers placed:", drivers.length);
+  },
+  undefined,
+  (error) => console.error("Could not load driver.glb", error),
+);
+
+// The point a vehicle is driving towards, shifted onto the right-hand lane.
+// At corners, it's where the lane you're leaving meets the lane you're joining.
 function laneTarget(bus) {
   const len = DANFO_ROUTE.length;
-  const target = DANFO_ROUTE[bus.userData.routeIndex];
-  const prev = DANFO_ROUTE[(bus.userData.routeIndex - 1 + len) % len];
-  const dx = target.x - prev.x;
-  const dz = target.z - prev.z;
-  const d = Math.hypot(dx, dz) || 1;
-  return {
-    x: target.x - (dz / d) * LANE_OFFSET,
-    z: target.z + (dx / d) * LANE_OFFSET,
-    stop: target.stop,
+  const i = bus.userData.routeIndex;
+  const target = DANFO_ROUTE[i];
+  if (target.noLane) return target; // roundabout points are already in the right place
+
+  const prev = DANFO_ROUTE[(i - 1 + len) % len];
+  const next = DANFO_ROUTE[(i + 1) % len];
+  const unit = (ax, az, bx, bz) => {
+    const d = Math.hypot(bx - ax, bz - az) || 1;
+    return [(bx - ax) / d, (bz - az) / d];
   };
+  const [inX, inZ] = unit(prev.x, prev.z, target.x, target.z); // the way in
+  const [outX, outZ] = unit(target.x, target.z, next.x, next.z); // the way out
+
+  // Keep to the right of the way in
+  let offsetX = -inZ * LANE_OFFSET;
+  let offsetZ = inX * LANE_OFFSET;
+
+  // Turning a corner? Also move across to the right of the way out
+  const turning = inX * outX + inZ * outZ < 0.85; // more than about 30 degrees
+  if (turning) {
+    offsetX += -outZ * LANE_OFFSET;
+    offsetZ += outX * LANE_OFFSET;
+  }
+
+  return { x: target.x + offsetX, z: target.z + offsetZ, stop: target.stop };
 }
 
 // The name of this bus's next stop
@@ -695,7 +1200,7 @@ function exchangePassengers(bus) {
   const getOff = Math.floor(Math.random() * 4);
   const getOn = Math.floor(Math.random() * 4);
   d.passengers = Math.max(0, d.passengers - getOff);
-  d.passengers = Math.min(BUS_SEATS - playerSeat, d.passengers + getOn);
+  d.passengers = Math.min(seatsOf(bus) - playerSeat, d.passengers + getOn);
   updateSeatFigures(bus);
 }
 
@@ -735,7 +1240,7 @@ function updateBus(bus, dt) {
 
   // Slow down for sharp turns
   const sharpTurn = Math.abs(diff) > 0.4;
-  const step = BUS_SPEED * (sharpTurn ? 0.25 : 1) * dt;
+  const step = (d.speed ?? BUS_SPEED) * (sharpTurn ? 0.25 : 1) * dt;
   bus.position.x += Math.sin(bus.rotation.y) * step;
   bus.position.z += Math.cos(bus.rotation.y) * step;
 }
@@ -767,7 +1272,7 @@ window.addEventListener("keydown", (e) => {
       return;
     }
     // Get off on the door side first, then the other side
-    for (const side of [-2.2, -2.2]) {
+    for (const side of [-2.2, 2.2]) {
       const offset = new THREE.Vector3(side, 0, 0).applyAxisAngle(
         UP,
         currentBus.rotation.y,
@@ -779,6 +1284,7 @@ window.addEventListener("keydown", (e) => {
         player.visible = true;
         const leftBus = currentBus;
         currentBus = null;
+        stopRadio();
         updateSeatFigures(leftBus);
         boardCooldown = 3;
         showMessage(`You got off at ${stop}`, 2.5);
@@ -793,18 +1299,19 @@ window.addEventListener("keydown", (e) => {
       showMessage("The danfo is moving. Wait for it to stop!", 2);
       return;
     }
-    if (bus.userData.passengers >= BUS_SEATS) {
+    if (bus.userData.passengers >= seatsOf(bus)) {
       showMessage("This danfo is full! Wait for the next one.", 2.5);
       return;
     }
-    if (!spendMoney(DANFO_FARE)) {
-      showMessage(`You need ₦${DANFO_FARE} for the fare`, 2.5);
+    if (!spendMoney(fareOf(bus))) {
+      showMessage(`You need ₦${fareOf(bus)} for the fare`, 2.5);
       return;
     }
     currentBus = bus;
     player.visible = false;
+    startRadio(); // the driver's music comes on
     updateSeatFigures(bus);
-    showMessage(`Paid ₦${DANFO_FARE}. Next stop: ${nextStopName(bus)}`, 2.5);
+    showMessage(`Paid ₦${fareOf(bus)}. Next stop: ${nextStopName(bus)}`, 2.5);
   }
 });
 // ---------- Passers-by and bus-goers ----------
@@ -812,13 +1319,17 @@ const NPC_MODELS = [
   "/models/npc-office.glb",
   "/models/npc-marketwoman.glb",
   "/models/npc-dansiki.glb",
+  "/models/npc-police.glb",
+  "/models/npc-streetboy.glb",
+  "/models/npc-seller.glb",
+  "/models/npc-artisan.glb",
 ];
-const PEDESTRIAN_COUNT = 60; // how many people walk the streets
+const PEDESTRIAN_COUNT = 50; // how many people walk the streets
 const NPC_HEIGHT = 1.7; // metres
 const NPC_TURN_FIX = 0; // change to Math.PI if they walk backwards
 const SIDEWALK_OFFSET = 6; // how far from the middle of the road they walk
-const MAX_WAITING = 6; // most people waiting at one bus stop
-const JOIN_STOP_CHANCE = 0.3; // chance per second that a walker passing a stop waits there
+const MAX_WAITING = 4; // most people waiting at one bus stop
+const JOIN_STOP_CHANCE = 0.2; // chance per second that a walker passing a stop waits there
 
 // The middle line of each road: [x1, z1, x2, z2]
 const ROAD_LINES = [
@@ -829,6 +1340,9 @@ const ROAD_LINES = [
   [65, 40, 185, 40], // Island road from the bridge
   [120, -140, 120, 160], // Island north-south road
   [65, -130, 185, -130], // Lekki road
+  [0, 40, 0, 125], // mainland link road
+  [120, 150, 180, 150], // Island north road
+  [180, -130, 180, 150], // Island east road
 ];
 
 // Turn each road into two footpaths, one on each side
@@ -862,8 +1376,8 @@ DANFO_ROUTE.forEach((point, i) => {
   const rightZ = dx / d;
   BUS_STOPS.push({
     name: point.stop,
-    x: point.x + rightX * 5.5,
-    z: point.z + rightZ * 5.5,
+    x: point.x + rightX * 6.2,
+    z: point.z + rightZ * 6.2,
     alongX: dx / d,
     alongZ: dz / d,
     faceRoad: Math.atan2(-rightX, -rightZ),
@@ -900,7 +1414,10 @@ function waitingAt(stop) {
 function seatsFree(bus) {
   const d = bus.userData;
   return (
-    BUS_SEATS - d.passengers - (d.boarding || 0) - (currentBus === bus ? 1 : 0)
+    seatsOf(bus) -
+    d.passengers -
+    (d.boarding || 0) -
+    (currentBus === bus ? 1 : 0)
   );
 }
 
@@ -943,7 +1460,7 @@ function startWaiting(p, stop, instant) {
   let tz = stop.z;
   for (let tries = 0; tries < 10; tries++) {
     const along = (Math.random() - 0.5) * 7; // spread along the road, unevenly
-    const back = -0.5 + Math.random() * 1.7; // some at the kerb's edge, some further back
+    const back = -0.3 + Math.random() * 0.9; // some at the kerb's edge, some under the shelter
     tx = stop.x + stop.alongX * along - Math.sin(stop.faceRoad) * back;
     tz = stop.z + stop.alongZ * along - Math.cos(stop.faceRoad) * back;
 
@@ -1039,9 +1556,9 @@ function looksSimilar(a, b) {
   if (hueGap > Math.PI) hueGap = Math.PI * 2 - hueGap;
   const shadeGap = Math.abs(a.look.brightness - b.look.brightness);
 
-  const sameColour = hueGap < 1.0;                                   // colours too close
-  const bothLight = a.look.brightness > 1 && b.look.brightness > 1;  // both light shades
-  const sameShade = shadeGap < 0.12;                                  // shades too close
+  const sameColour = hueGap < 1.0; // colours too close
+  const bothLight = a.look.brightness > 1 && b.look.brightness > 1; // both light shades
+  const sameShade = shadeGap < 0.12; // shades too close
   return sameColour || bothLight || sameShade;
 }
 
@@ -1117,6 +1634,8 @@ function spawnPedestrian(template) {
   const actions = {};
   if (template.clips.walk) actions.walk = mixer.clipAction(template.clips.walk);
   if (template.clips.idle) actions.idle = mixer.clipAction(template.clips.idle);
+  // Faster walkers step faster, so their feet don't slide
+  const NPC_WALK_PACE = 1.3; // the walking speed (m/s) the animation was made for
 
   let hips = null;
   model.traverse((obj) => {
@@ -1141,6 +1660,8 @@ function spawnPedestrian(template) {
     tx: 0,
     tz: 0,
   };
+
+  if (actions.walk) actions.walk.timeScale = p.speed / NPC_WALK_PACE;
 
   // Every fourth person starts out already waiting at a bus stop
   if (pedestrians.length % 4 === 0) {
@@ -1224,7 +1745,7 @@ function updatePedestrians(dt) {
           // In they go
           bus.userData.boarding--;
           bus.userData.passengers = Math.min(
-            BUS_SEATS,
+            seatsOf(bus),
             bus.userData.passengers + 1,
           );
           updateSeatFigures(bus);
@@ -1256,6 +1777,41 @@ function updatePedestrians(dt) {
   }
 }
 
+const signMaterial = new THREE.MeshStandardMaterial({
+  color: 0x1565c0,
+  alphaTest: 0.5,
+  side: THREE.FrontSide, // each face only shows from its own side
+});
+
+new THREE.TextureLoader().load("/textures/busstop-sign.png", (tex) => {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  signMaterial.map = tex;
+  signMaterial.color.set(0xffffff);
+  signMaterial.needsUpdate = true;
+});
+
+for (const stop of BUS_STOPS) {
+  const sign = new THREE.Group();
+
+  // Front face, readable from the road
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(1, 3), signMaterial);
+  sign.add(front);
+
+  // Back face, turned round so it also reads the right way from behind
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(1, 3), signMaterial);
+  back.rotation.y = Math.PI;
+  back.position.z = -0.01; // a hair behind the front, so they don't flicker
+  sign.add(back);
+
+  sign.position.set(
+    stop.x - Math.sin(stop.faceRoad) * 0.9 + stop.alongX * 3, // just behind the waiting area, to one side
+    1.5,
+    stop.z - Math.cos(stop.faceRoad) * 0.9 + stop.alongZ * 3,
+  );
+  sign.rotation.y = stop.faceRoad; // facing the road
+  scene.add(sign);
+}
+
 // ---------- Load each NPC and spawn their share of people ----------
 NPC_MODELS.forEach((path) => {
   loader.load(
@@ -1272,6 +1828,228 @@ NPC_MODELS.forEach((path) => {
   );
 });
 
+// ================= Sound =================
+const listener = new THREE.AudioListener();
+camera.add(listener); // we hear the world from the camera
+const audioLoader = new THREE.AudioLoader();
+const sounds = {}; // loaded sound files, by name
+
+const SOUND_FILES = [
+  "city-ambience",
+  "room-ambience",
+  "tv-football",
+  "danfo-engine",
+  "danfo-horn",
+  "generator",
+  "kiosk-music",
+  "pay",
+  "door",
+];
+SOUND_FILES.forEach((name) => {
+  audioLoader.load(
+    `/sounds/${name}.mp3`,
+    (buffer) => {
+      sounds[name] = buffer;
+    },
+    undefined,
+    () => console.warn("Could not load sound", name),
+  );
+});
+
+// Phones only allow sound after the first touch or key press
+let soundStarted = false;
+function startSound() {
+  if (soundStarted) return;
+  soundStarted = true;
+  listener.context.resume();
+}
+window.addEventListener("pointerdown", startSound);
+window.addEventListener("keydown", startSound);
+
+// Start a looping sound if its file has loaded, or stop one
+function ensurePlaying(audio, name) {
+  if (!soundStarted || !sounds[name]) return;
+  if (!audio.buffer) audio.setBuffer(sounds[name]);
+  if (!audio.isPlaying) audio.play();
+}
+function ensureStopped(audio) {
+  if (audio.isPlaying) audio.stop();
+}
+
+// Play a short sound once (paying, the door)
+function playOnce(name, volume = 0.8) {
+  if (!soundStarted || !sounds[name]) return;
+  const sound = new THREE.Audio(listener);
+  sound.setBuffer(sounds[name]);
+  sound.setVolume(volume);
+  sound.play();
+}
+
+// ---------- Background loops (the same everywhere) ----------
+function makeLoop(name, volume) {
+  const audio = new THREE.Audio(listener);
+  audio.setLoop(true);
+  audio.setVolume(0);
+  return { audio, name, volume };
+}
+const loops = {
+  city: makeLoop("city-ambience", 0.5),
+  room: makeLoop("room-ambience", 0.4),
+  tv: makeLoop("tv-football", 0.15),
+};
+
+// Fade a loop in or out smoothly
+function fadeLoop(loop, on, dt) {
+  ensurePlaying(loop.audio, loop.name);
+  const current = loop.audio.getVolume();
+  const target = on ? loop.volume : 0;
+  loop.audio.setVolume(current + (target - current) * Math.min(1, dt * 2));
+}
+
+// ---------- Sounds that come from a place (louder when you're close) ----------
+function makePositional(name, closeDistance, volume, loop = true) {
+  const audio = new THREE.PositionalAudio(listener);
+  audio.setRefDistance(closeDistance); // full volume within this distance
+  audio.setRolloffFactor(1.5); // how quickly it fades with distance
+  audio.setVolume(volume);
+  audio.setLoop(loop);
+  const holder = new THREE.Object3D();
+  holder.add(audio);
+  scene.add(holder);
+  return { audio, holder, name, target: null };
+}
+
+// Only a few of each play at once: the nearest ones
+const enginePool = [0, 1, 2, 3].map(() =>
+  makePositional("danfo-engine", 4, 0.6),
+);
+const hornPool = [0, 1].map(() => makePositional("danfo-horn", 6, 0.8, false));
+const generatorPool = [0, 1, 2].map(() => makePositional("generator", 3, 0.5));
+const kioskPool = [0, 1].map(() => makePositional("kiosk-music", 3, 0.5));
+const musicKiosks = lagos.kioskSpots.filter((_, i) => i % 3 === 0); // one in three kiosks plays music
+
+// Point a pool of sounds at the nearest few places
+function assignNearest(pool, spots, maxDistance) {
+  const from = camera.position;
+  const nearest = spots
+    .map((s) => ({ s, d: Math.hypot(s.x - from.x, s.z - from.z) }))
+    .filter((e) => e.d < maxDistance)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, pool.length);
+  pool.forEach((slot, i) => {
+    const entry = nearest[i];
+    if (entry) {
+      slot.target = entry.s;
+      slot.holder.position.set(entry.s.x, 1, entry.s.z);
+      ensurePlaying(slot.audio, slot.name);
+    } else {
+      slot.target = null;
+      ensureStopped(slot.audio);
+    }
+  });
+}
+
+// ---------- Update all sound, every frame ----------
+let soundCheckTimer = 0;
+let hornTimer = 5;
+
+function updateSound(dt) {
+  if (!soundStarted) return;
+
+  // Street noise outside, fan and TV inside
+  fadeLoop(loops.city, !inRoom, dt);
+  fadeLoop(loops.room, inRoom, dt);
+  fadeLoop(loops.tv, inRoom, dt);
+
+  // Twice a second, find the nearest engines, generators and kiosks
+  soundCheckTimer -= dt;
+  if (soundCheckTimer <= 0) {
+    soundCheckTimer = 0.5;
+    const busSpots = inRoom
+      ? []
+      : allVehicles.map((b) => ({ x: b.position.x, z: b.position.z, bus: b }));
+    assignNearest(enginePool, busSpots, 45);
+    assignNearest(generatorPool, inRoom ? [] : lagos.generatorSpots, 30);
+    // No kiosk music in his room, or while riding (the danfo radio is playing)
+    assignNearest(kioskPool, inRoom || currentBus ? [] : musicKiosks, 25);
+  }
+
+  // Engine sounds follow their buses as they drive
+  for (const slot of enginePool) {
+    if (slot.target && slot.target.bus) {
+      slot.holder.position.copy(slot.target.bus.position).setY(1);
+    }
+  }
+
+  // Now and then, a nearby moving danfo sounds its horn
+  hornTimer -= dt;
+  if (hornTimer <= 0 && !inRoom) {
+    hornTimer = 6 + Math.random() * 10;
+    const nearby = buses.filter(
+      (b) => !b.userData.stop && b.position.distanceTo(camera.position) < 50,
+    );
+    const slot = hornPool.find((s) => !s.audio.isPlaying);
+    if (nearby.length && slot && sounds["danfo-horn"]) {
+      const bus = nearby[Math.floor(Math.random() * nearby.length)];
+      slot.holder.position.copy(bus.position).setY(1);
+      if (!slot.audio.buffer) slot.audio.setBuffer(sounds["danfo-horn"]);
+      slot.audio.play();
+    }
+  }
+}
+
+// ---------- Danfo radio: shuffled music whenever you're riding ----------
+// Give each track a title (you can make these up, like a real radio station)
+const RADIO_STATION = "Danfo FM";
+const RADIO_TRACKS = [
+  { file: "/sounds/radio/radio-1.mp3", title: "Lagos Groove" },
+  { file: "/sounds/radio/radio-2.mp3", title: "Highlife Sunday" },
+  { file: "/sounds/radio/radio-3.mp3", title: "Amapiano Nights" },
+  { file: "/sounds/radio/radio-4.mp3", title: "Owambe Vibes" },
+  { file: "/sounds/radio/radio-5.mp3", title: "Third Mainland Drive" },
+  { file: "/sounds/radio/radio-6.mp3", title: "Morning Praise" },
+];
+const RADIO_VOLUME = 0.6;
+
+const radio = new Audio(); // streams the song, so it doesn't load all of it at once
+radio.volume = RADIO_VOLUME;
+let radioOrder = [];
+let radioIndex = 0;
+
+// Mix up the order of the songs (a fair shuffle)
+function shuffleRadio() {
+  radioOrder = RADIO_TRACKS.map((_, i) => i);
+  for (let i = radioOrder.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [radioOrder[i], radioOrder[j]] = [radioOrder[j], radioOrder[i]];
+  }
+  radioIndex = 0;
+}
+
+function playNextTrack(showTitleAfter = 0) {
+  if (radioIndex >= radioOrder.length) shuffleRadio(); // played them all: shuffle again
+  const track = RADIO_TRACKS[radioOrder[radioIndex++]];
+  radio.src = track.file;
+  radio.play().catch(() => {}); // ignore if the phone hasn't allowed sound yet
+  setTimeout(() => {
+    if (currentBus) showMessage(`📻 ${RADIO_STATION} · ${track.title}`, 3);
+  }, showTitleAfter);
+}
+
+// When a song ends, play the next one
+radio.addEventListener("ended", () => {
+  if (currentBus) playNextTrack();
+});
+
+function startRadio() {
+  shuffleRadio();
+  playNextTrack(2600); // wait until the "Paid" message has shown before naming the song
+}
+
+function stopRadio() {
+  radio.pause();
+}
+
 // ---------- Camera follow (moves closer if something is in the way) ----------
 function updateCamera(target, distance, height, lookHeight, avoidBuses) {
   const angle = target.rotation.y;
@@ -1283,11 +2061,11 @@ function updateCamera(target, distance, height, lookHeight, avoidBuses) {
   for (let d = 0.5; d <= distance; d += 0.25) {
     const x = target.position.x + dirX * d;
     const z = target.position.z + dirZ * d;
-    if (
-      lagos.hitsBuilding(x, z, 0.3) ||
-      (avoidBuses && hitsAnyBus(x, z, 0.3))
-    ) {
-      safeDistance = Math.max(d - 0.5, 1.5);
+    const hitsSomething = inRoom
+      ? room.hitsWall(x, z, 0.3)
+      : lagos.hitsBuilding(x, z, 0.3);
+    if (hitsSomething || (avoidBuses && hitsAnyBus(x, z, 0.3))) {
+      safeDistance = Math.max(d - 0.5, inRoom ? 0.6 : 1.5); // closer indoors, so it never ends up in a wall
       break;
     }
   }
@@ -1309,19 +2087,46 @@ function updateCamera(target, distance, height, lookHeight, avoidBuses) {
 }
 
 // Start the camera behind the player
-camera.position.set(player.position.x - 6, 3, player.position.z);
+camera.position.set(player.position.x, 2.2, player.position.z - 2); // inside his room
 
 // ---------- Game loop ----------
 const hud = document.getElementById("hud");
+const messageBox = document.getElementById("message");
 const clock = new THREE.Clock();
+
+// ---------- FPS counter ----------
+const fpsDisplay = document.getElementById("fps");
+let fpsFrames = 0;
+let fpsTime = 0;
 
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
+  // Count frames, and update the FPS display once a second
+  fpsFrames++;
+  if (performance.now() - (window.lastFpsUpdate || 0) > 1000) {
+    fpsDisplay.textContent = `FPS: ${fpsFrames}`;
+    fpsFrames = 0;
+    window.lastFpsUpdate = performance.now();
+  }
   if (playerMixer) playerMixer.update(dt);
   keepPlayerCentred();
   for (const bus of buses) updateBus(bus, dt); // the danfos drive themselves
+  for (const v of traffic) updateTrafficVehicle(v, dt); // cars, jeeps and trucks
+  for (const { vehicle, driver } of drivers) {
+    driver.visible = vehicle.position.distanceTo(camera.position) < 60;
+  }
   updatePedestrians(dt); // passers-by walk along the footpaths
+  lagos.update(dt); // the lagoon and ocean drift
+  updateSound(dt); // street noise, engines, horns, generators, music
+  if (inRoom) room.update(dt); // the fan spins
+
+  // Indoors is darker than outdoors
+  const INDOOR_LIGHT = 0.3; // lower = darker room, higher = brighter (0 to 1)
+  skyLight.intensity = inRoom ? 1.5 * INDOOR_LIGHT : 1.5;
+  sun.intensity = inRoom ? 2 * INDOOR_LIGHT : 2;
+  scene.environmentIntensity = inRoom ? INDOOR_LIGHT : 1;
+
   // Only draw passengers in buses near the camera
   for (const bus of buses) {
     bus.userData.seatGroup.visible =
@@ -1337,33 +2142,57 @@ function animate() {
       currentBus.position.z,
     );
     hud.textContent = d.stop
-      ? `${area}  ·  ${d.stop} bus stop  ·  E to get off`
+      ? `${area}  ·  ${d.stop} bus stop  ·  ${ON_TOUCH ? "Tap Get off" : "E to get off"}`
       : `${area}  ·  On the danfo  ·  Next stop: ${nextStopName(currentBus)}`;
   } else {
     updatePlayer(dt);
-    updateCamera(player, 6, 3, 1.5, true);
+    updateCamera(
+      player,
+      inRoom ? 3.5 : 6,
+      inRoom ? 2.2 : 3,
+      inRoom ? 1.3 : 1.5,
+      true,
+    );
     const area = lagos.getDistrict(player.position.x, player.position.z);
     const bus = nearestBus(5);
     if (bus && bus.userData.stop) {
-      const seatsLeft = BUS_SEATS - bus.userData.passengers;
+      const seatsLeft = seatsOf(bus) - bus.userData.passengers;
       const stopName = nextStopName(bus);
       hud.textContent =
         seatsLeft > 0
-          ? `Conductor: "${stopName}! ${stopName}! Enter with your change!"  ·  ${seatsLeft} seats left  ·  E to board (₦${DANFO_FARE})`
+          ? `${rideCall(bus, stopName)}  ·  ${seatsLeft} seats left  ·  ${ON_TOUCH ? "Tap Board" : "E to board"} (₦${fareOf(bus)})`
           : `Conductor: "E don full! Wait for the next one!"`;
     } else if (bus) {
       hud.textContent = `${area}  ·  The danfo is moving`;
     } else {
-      hud.textContent = `${area}  ·  On foot  ·  Shift to run`;
+      hud.textContent = `${area}  ·  On foot  ·  ${ON_TOUCH ? "Push the stick to the edge to run" : "Shift to run"}`;
     }
   }
 
-  // A temporary message overrides the HUD
+  // Inside his room
+  if (inRoom && !currentBus) {
+    hud.textContent =
+      playerState === "sitting"
+        ? ON_TOUCH
+          ? "Tap Get up when you are ready"
+          : "Press E when you are ready to get up"
+        : room.nearDoor(player.position)
+          ? ON_TOUCH
+            ? "Tap Go out to leave the house"
+            : "Press E to go outside"
+          : "My room";
+  }
+  // Tidy the HUD: each part on its own line (the first line is the heading)
+  hud.textContent = hud.textContent.replace(/\s+·\s+/g, "\n");
+
+  // Thoughts and messages go in their own box, which fades in and out
   if (messageTimer > 0) {
     messageTimer -= dt;
-    hud.textContent = messageText;
+    messageBox.textContent = messageText;
+    messageBox.classList.add("show");
+  } else {
+    messageBox.classList.remove("show");
   }
-
   renderer.render(scene, camera);
 }
 animate();
@@ -1404,6 +2233,7 @@ function earnMoney(amount) {
   money += amount;
   updateMoneyDisplay();
   flashMoney("earn");
+  playOnce("pay", 0.7); // the sound of money changing hands
 }
 
 updateMoneyDisplay();
@@ -1414,3 +2244,124 @@ window.addEventListener("keydown", (e) => {
   if (key === "m" && !spendMoney(500)) console.log("Not enough money!");
   if (key === "n") earnMoney(1000);
 });
+
+// ---------- Touch controls (phones and tablets) ----------
+const isTouch =
+  window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+if (isTouch) document.body.classList.add("touch");
+
+const joystick = document.getElementById("joystick");
+const knob = document.getElementById("joystick-knob");
+// How far the knob can move, in pixels (fits whatever size the joystick is)
+const joyRadius = () => joystick.clientWidth / 2 - 15;
+let joyPointer = null;
+
+// Turn the knob's position into the same keys the keyboard uses
+function setJoystick(dx, dy) {
+  const dist = Math.hypot(dx, dy);
+  const radius = joyRadius();
+  if (dist > radius) {
+    dx = (dx / dist) * radius;
+    dy = (dy / dist) * radius;
+  }
+  knob.style.transform = `translate(${dx}px, ${dy}px)`;
+
+  const x = dx / radius;
+  const y = dy / radius;
+  joyX = x; // smooth left/right
+  joyY = y; // smooth up/down
+  keys["shift"] = Math.hypot(x, y) > 0.9; // pushed to the edge: run
+}
+
+function moveJoystick(e) {
+  const rect = joystick.getBoundingClientRect();
+  setJoystick(
+    e.clientX - (rect.left + rect.width / 2),
+    e.clientY - (rect.top + rect.height / 2),
+  );
+}
+
+joystick.addEventListener("pointerdown", (e) => {
+  joyPointer = e.pointerId;
+  joystick.setPointerCapture(e.pointerId);
+  moveJoystick(e);
+});
+
+joystick.addEventListener("pointermove", (e) => {
+  if (e.pointerId === joyPointer) moveJoystick(e);
+});
+
+function endJoystick(e) {
+  if (e.pointerId !== joyPointer) return;
+  joyPointer = null;
+  setJoystick(0, 0); // let go: stop
+}
+joystick.addEventListener("pointerup", endJoystick);
+joystick.addEventListener("pointercancel", endJoystick);
+
+// Action button: does exactly what pressing E does
+const actionButton = document.getElementById("action-button");
+actionButton.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "e" }));
+});
+
+// Keep the button's label up to date, and only show it when there's something to do
+setInterval(() => {
+  actionButton.textContent = inRoom
+    ? playerState === "sitting"
+      ? "Get up"
+      : "Go out"
+    : currentBus
+      ? "Get off"
+      : "Board";
+
+  const canAct = inRoom
+    ? playerState === "sitting" || room.nearDoor(player.position) // get up, or go out
+    : currentBus !== null || nearestBus(5) !== null; // get off, or board
+  actionButton.style.visibility = canAct ? "visible" : "hidden";
+}, 200);
+
+// ---------- Leaving his room ----------
+window.addEventListener("keydown", (e) => {
+  if (e.key.toLowerCase() !== "e" || e.repeat || !inRoom) return;
+  if (playerState === "sitting") {
+    startStandingUp(); // the action button (or E) makes him get up
+    return;
+  }
+  if (!room.nearDoor(player.position)) return;
+  inRoom = false;
+  playOnce("door", 0.8);
+  player.position.set(room.outside.x, 0, room.outside.z);
+  player.rotation.y = room.outside.rotation;
+  camera.position.set(player.position.x, 3, player.position.z - 6);
+  showMessage("Lagos. Time to go.", 2.5);
+});
+
+// ---------- His thoughts at the start ----------
+const OPENING_THOUGHTS = [
+  "My cousin's wedding is in Lagos...",
+  "Everything for the owambe is scattered across all 36 states and Abuja.",
+  `And all I have is ₦${STARTING_MONEY.toLocaleString("en-NG")}.`,
+  "Okay. Let's go.",
+];
+OPENING_THOUGHTS.forEach((line, i) => {
+  setTimeout(() => showMessage(line, 3.5), 500 + i * 3800);
+});
+
+// ---------- Landscape: full screen and locked sideways on the first tap (Android) ----------
+function goLandscape() {
+  const page = document.documentElement;
+  if (!document.fullscreenElement && page.requestFullscreen) {
+    page
+      .requestFullscreen()
+      .then(() => {
+        if (screen.orientation && screen.orientation.lock) {
+          screen.orientation.lock("landscape").catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
+}
+if (ON_TOUCH)
+  window.addEventListener("pointerdown", goLandscape, { once: true });

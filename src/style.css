@@ -1,41 +1,212 @@
 body {
   margin: 0;
   overflow: hidden;
-  font-family: sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
+/* ---------- Where you are, and what you can do (top left) ---------- */
 #hud {
   position: fixed;
-  top: 16px;
-  left: 16px;
-  padding: 8px 14px;
-  background: rgba(0, 0, 0, 0.6);
-  color: #ffc400;
-  font-size: 20px;
-  font-weight: bold;
-  border-radius: 8px;
+  top: calc(12px + env(safe-area-inset-top));
+  left: 12px;
+  max-width: calc(100vw - 150px); /* never reaches the money box */
+  padding: 8px 12px;
+  background: rgba(15, 15, 15, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: 12px;
+  color: #eeeeee;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line; /* each part on its own line */
+  pointer-events: none;
 }
 
+/* The first line is the heading */
+#hud::first-line {
+  color: #ffc400;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+/* ---------- Money (top right) ---------- */
 #money {
   position: fixed;
-  top: 16px;
-  right: 16px;
-  padding: 8px 14px;
-  background: rgba(0, 0, 0, 0.6);
-  color: #4caf50;
-  font-size: 22px;
-  font-weight: bold;
-  border-radius: 8px;
+  top: calc(12px + env(safe-area-inset-top));
+  right: 12px;
+  padding: 8px 12px;
+  background: rgba(15, 15, 15, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: 12px;
+  color: #6fdc8c;
+  font-size: 16px;
+  font-weight: 700;
+  pointer-events: none;
   transition: transform 0.15s, color 0.15s;
 }
 
-/* Flashes red when money is spent, gold when it's earned */
 #money.spend {
-  color: #ff5252;
-  transform: scale(1.15);
+  color: #ff6b6b;
+  transform: scale(1.12);
 }
 
 #money.earn {
   color: #ffd54f;
-  transform: scale(1.15);
+  transform: scale(1.12);
+}
+
+/* ---------- Thoughts and messages (bottom centre, above the controls) ---------- */
+#message {
+  position: fixed;
+  left: 50%;
+  bottom: calc(195px + env(safe-area-inset-bottom));
+  width: min(85vw, 420px);
+  box-sizing: border-box;
+  padding: 12px 16px;
+  background: rgba(15, 15, 15, 0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-left: 4px solid #ffc400;
+  border-radius: 12px;
+  color: #ffffff;
+  font-size: 15px;
+  line-height: 1.45;
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+  transition: opacity 0.3s, transform 0.3s;
+}
+
+#message.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ---------- FPS counter (small, bottom left) ---------- */
+#fps {
+  position: fixed;
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  left: 12px;
+  padding: 2px 8px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #ffffff;
+  font-size: 11px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* ---------- Joystick (bottom left) ---------- */
+#joystick {
+  position: fixed;
+  left: 30px;
+  bottom: calc(50px + env(safe-area-inset-bottom));
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  display: none;
+  touch-action: none;
+}
+
+#joystick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+/* ---------- Action button (bottom right) ---------- */
+#action-button {
+  position: fixed;
+  right: 30px;
+  bottom: calc(70px + env(safe-area-inset-bottom));
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 196, 0, 0.9);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  color: #222222;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  display: none;
+  touch-action: none;
+}
+
+/* Only show the joystick and button on touch screens */
+.touch #joystick,
+.touch #action-button {
+  display: block;
+}
+
+/* ---------- "Turn your phone" notice (phones held upright) ---------- */
+#rotate-notice {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #111111;
+  color: #ffffff;
+  font-size: 18px;
+  text-align: center;
+}
+
+@media (orientation: portrait) and (pointer: coarse) {
+  #rotate-notice {
+    display: flex;
+  }
+}
+
+/* ---------- Layout for a wide (landscape) phone screen ---------- */
+@media (orientation: landscape) and (pointer: coarse) {
+  #hud {
+    left: calc(12px + env(safe-area-inset-left));
+    max-width: 45vw;
+  }
+
+  #money {
+    right: calc(12px + env(safe-area-inset-right));
+  }
+
+  /* Messages sit at the bottom, between the joystick and the button */
+  #message {
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    width: min(48vw, 420px);
+  }
+
+  /* FPS moves to the top right, under the money */
+  #fps {
+    left: auto;
+    right: calc(12px + env(safe-area-inset-right));
+    top: calc(60px + env(safe-area-inset-top));
+    bottom: auto;
+  }
+
+  #joystick {
+    width: 110px;
+    height: 110px;
+    left: calc(28px + env(safe-area-inset-left));
+    bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+
+  #action-button {
+    width: 80px;
+    height: 80px;
+    right: calc(32px + env(safe-area-inset-right));
+    bottom: calc(32px + env(safe-area-inset-bottom));
+  }
 }
